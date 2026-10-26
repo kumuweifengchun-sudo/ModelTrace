@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import math
@@ -30,6 +31,14 @@ from fingerprint import (  # noqa: E402
 
 DEFAULT_RESPONSES = PROJECT / "data" / "gpt_reference.jsonl"
 DEFAULT_OUTPUT = PROJECT / "data" / "gpt_bank.json"
+VALIDATION_VERSION = 1
+
+
+def reference_digest(rows: list[dict]) -> str:
+    """Fingerprint the inputs used by the scorer, without storing another raw copy."""
+    fields = ("source", "condition_id", "nuisance_condition_id", "challenge_id", "family_id", "family_name", "numbers")
+    values = [{key: row.get(key) for key in fields} for row in rows]
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -228,6 +237,55 @@ def fit_beta(records: list[tuple[list[float], int]]) -> tuple[float, float]:
     return best_beta, best_loss
 
 
+def validate_environments(rows: list[dict], model_ids: list[str]) -> dict:
+    """Hold out whole environments, including every model and repeated collection."""
+    records = {str(count): [] for count in (1, 2, 3)}
+    conditions = sorted({row["condition_id"] for row in rows})
+    for condition in conditions:
+        train = [row for row in rows if row["condition_id"] != condition]
+        if {row["source"] for row in train} != set(model_ids):
+            continue
+        score_bank = {"robust": fit_robust_artifacts(train, model_ids)}
+        for truth, model_id in enumerate(model_ids):
+            held = [row for row in rows if row["condition_id"] == condition and row["source"] == model_id]
+            # Repeated answers to the same challenge are one validation unit.
+            grouped = {}
+            for row in held:
+                grouped.setdefault(row["challenge_id"], []).append(
+                    robust_score_numbers(row["numbers"], score_bank)["fused"]
+                )
+            scores = [np.mean(grouped[key], axis=0) for key in sorted(grouped)]
+            for count in (1, 2, 3):
+                # Bound validation cost for large imported banks.
+                for subset in itertools.islice(itertools.combinations(scores, count), 60):
+                    combined = np.mean(subset, axis=0)
+                    records[str(count)].append((combined, truth))
+
+    queries = {}
+    for key, items in records.items():
+        by_model = {model_id: {"samples": 0, "correct": 0, "confusions": {}} for model_id in model_ids}
+        pair_errors = {}
+        for scores, truth in items:
+            predicted = int(np.argmax(scores))
+            summary = by_model[model_ids[truth]]
+            summary["samples"] += 1
+            summary["correct"] += int(predicted == truth)
+            if predicted != truth:
+                other = model_ids[predicted]
+                summary["confusions"][other] = summary["confusions"].get(other, 0) + 1
+                pair = tuple(sorted((model_ids[truth], other)))
+                entry = pair_errors.setdefault(pair, {"errors": 0, "max_error_margin": 0.0})
+                entry["errors"] += 1
+                entry["max_error_margin"] = max(entry["max_error_margin"], float(scores[predicted] - scores[truth]))
+        queries[key] = {
+            "samples": len(items),
+            "accuracy": sum(item["correct"] for item in by_model.values()) / len(items) if items else None,
+            "models": by_model,
+            "confused_pairs": [{"models": list(pair), **entry} for pair, entry in sorted(pair_errors.items())],
+        }
+    return {"version": VALIDATION_VERSION, "method": "leave-one-environment-out", "queries": queries}
+
+
 def build_bank(rows: list[dict], fallback_calibration: dict | None = None) -> dict:
     model_ids = list(dict.fromkeys(row["source"] for row in rows))
     model_entries = []
@@ -301,6 +359,8 @@ def build_bank(rows: list[dict], fallback_calibration: dict | None = None) -> di
         "minimum_valid_numbers": 80,
         "source_scope": source_scope,
         "providers": providers,
+        "reference_digest": reference_digest(rows),
+        "validation": validate_environments(rows, model_ids),
         "models": model_entries,
         "robust": robust,
         "calibration": calibration,

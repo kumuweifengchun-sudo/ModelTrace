@@ -74,11 +74,18 @@ function renderChallenges() {
 }
 
 function renderResult(payload) {
+  const identification = payload.identification || { status: "unvalidated", message: "当前结果仅表示候选排序，不能确认模型身份。" };
+  const ambiguous = identification.status === "ambiguous";
+  const candidateNames = (identification.candidates || []).map((id) => payload.results.find((item) => item.model === id)?.display_name || id);
+  const validation = identification.validation;
+  const validationNote = validation?.samples
+    ? `该候选在留出环境验证中正确 ${validation.correct}/${validation.samples} 组；此统计来自已有采集数据，不代表实时接口准确率。`
+    : "该候选尚无足够的独立环境验证数据。";
   const diagnostics = payload.diagnostics.map((item, index) => `
     <span class="diagnostic ${item.accepted ? "accepted" : "rejected"}">挑战 ${index + 1}: ${item.parsed_numbers} 个数字 · ${item.accepted ? "计入" : "忽略"}</span>
   `).join("");
   const rows = payload.results.map((item, index) => `
-    <tr class="${index === 0 ? "winner" : ""}">
+    <tr class="${index === 0 && !ambiguous ? "winner" : ""}">
       <td>${index + 1}</td><td><strong>${escapeHtml(item.display_name)}</strong></td><td>${escapeHtml(item.family_name)}</td>
       <td><div class="probability-cell"><span><i style="width:${item.probability * 100}%"></i></span><strong>${percent(item.probability)}</strong></div></td>
       <td>${percent(item.profile_similarity)}</td>
@@ -89,16 +96,21 @@ function renderResult(payload) {
     : "";
   byId("result").innerHTML = `
     <div class="result-summary">
-      <div><span>最可能模型</span><strong>${escapeHtml(payload.prediction_name)}</strong></div>
-      <div><span>统一库概率</span><strong>${percent(payload.probability)}</strong></div>
+      <div><span>识别结论</span><strong>${ambiguous ? "无法可靠区分" : identification.status === "unvalidated" ? "验证不足" : escapeHtml(payload.prediction_name)}</strong></div>
+      <div><span>首位候选概率（库内）</span><strong>${percent(payload.probability)}</strong></div>
       <div><span>自动识别家族</span><strong>${escapeHtml(payload.family_prediction_name)} · ${percent(payload.family_probability)}</strong></div>
       <div><span>有效查询</span><strong>${payload.used_outputs}/3</strong></div>
+    </div>
+    <div class="result-guidance" role="status">
+      <p>${escapeHtml(identification.message)}</p>
+      ${ambiguous ? `<p>待区分候选：${escapeHtml(candidateNames.join("、"))}</p>` : ""}
+      <p>${escapeHtml(validationNote)}</p>
     </div>
     <div class="diagnostics">${diagnostics}</div>
     <div class="table-wrap"><table><thead><tr><th>排序</th><th>候选模型</th><th>家族</th><th>归因概率</th><th>分布相似度</th></tr></thead><tbody>${rows}</tbody></table></div>
     ${apiNote ? `<div class="result-note">${apiNote}</div>` : ""}
     <div class="result-guidance" role="note" aria-label="结果说明">
-      <p>本工具仅对指纹库内的模型进行归因；若待测模型不在指纹库中，得到任何结果都有可能。</p>
+      <p>本工具仅对指纹库内的模型进行归因；若待测模型不在指纹库中，得到任何结果都有可能。两次测试排名相同不能证明两个接口使用同一个模型。</p>
       <p>Claude Code 的系统提示词会影响模型偏好，测试结果存在较大偏差，建议不要在 Claude Code 中测试。</p>
     </div>
   `;

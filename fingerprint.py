@@ -269,12 +269,54 @@ def analyze_outputs(outputs: list[dict], bank: dict) -> dict:
         "used_outputs": len(valid),
         "results": results,
         "diagnostics": diagnostics,
+        "identification": assess_identification(results, bank, calibration_key),
         "calibration": {
             "queries": calibration_key,
             "beta": beta,
             "cv_accuracy": bank["calibration"][calibration_key]["cv_accuracy"],
         },
         "method": bank.get("method", {}).get("name", "Ordered-block + nuisance-Hellinger"),
+    }
+
+
+def assess_identification(results: list[dict], bank: dict, query_key: str) -> dict:
+    """Ranking remains available, but is not proof of an upstream model identity."""
+    validation = bank.get("validation", {}).get("queries", {}).get(query_key, {})
+    winner = results[0]
+    model_validation = validation.get("models", {}).get(winner["model"], {})
+    ranked = {item["model"]: item for item in results}
+    candidates = {winner["model"]}
+    confused_pairs = []
+    for pair in validation.get("confused_pairs", []):
+        if winner["model"] not in pair["models"]:
+            continue
+        other = next(model for model in pair["models"] if model != winner["model"])
+        if other not in ranked:
+            continue
+        margin = winner["score"] - ranked[other]["score"]
+        if margin <= pair["max_error_margin"] + 1e-12:
+            candidates.add(other)
+            confused_pairs.append(pair)
+    # Equal scores cannot resolve identity, even with an older/unvalidated bank.
+    for item in results[1:]:
+        if abs(winner["score"] - item["score"]) <= 1e-12:
+            candidates.add(item["model"])
+    if len(candidates) > 1:
+        status = "ambiguous"
+        message = "无法可靠区分：候选得分差距处于留出环境验证曾发生误判的范围内，或候选得分相同。"
+    elif len(results) < 2 or model_validation.get("samples", 0) < 3:
+        status = "unvalidated"
+        message = "独立环境验证不足，当前只能给出候选排序，不能确认具体模型。"
+    else:
+        status = "closest_match"
+        message = "当前指纹最接近排名第一的候选；这不是上游模型身份的证明。"
+    return {
+        "status": status,
+        "message": message,
+        "candidates": [item["model"] for item in results if item["model"] in candidates],
+        "confused_pairs": confused_pairs,
+        "validation": model_validation,
+        "validation_method": bank.get("validation", {}).get("method"),
     }
 
 

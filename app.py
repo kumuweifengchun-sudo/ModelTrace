@@ -10,7 +10,7 @@ from flask import Flask, jsonify, render_template, request
 
 from enrollment import bank_summary, enroll_automatic, request_completion, test_automatic
 from fingerprint import analyze_global_outputs, generate_challenges, load_bank, parse_numbers
-from bank_builder import build_bank, read_rows
+from bank_builder import VALIDATION_VERSION, build_bank, read_rows, reference_digest
 
 
 app = Flask(__name__)
@@ -94,9 +94,9 @@ def global_reference_rows() -> list[dict]:
     return rows
 
 
-def rebuild_global_bank() -> dict:
+def rebuild_global_bank(rows: list[dict] | None = None) -> dict:
     global unified_bank
-    unified_bank = build_bank(global_reference_rows())
+    unified_bank = build_bank(global_reference_rows() if rows is None else rows)
     UNIFIED_BANK_FILE.write_text(
         json.dumps(unified_bank, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -105,8 +105,13 @@ def rebuild_global_bank() -> dict:
 
 
 unified_bank = load_bank(UNIFIED_BANK_FILE) if UNIFIED_BANK_FILE.exists() else None
-if unified_bank is None:
-    rebuild_global_bank()
+reference_rows = global_reference_rows()
+if (
+    unified_bank is None
+    or unified_bank.get("reference_digest") != reference_digest(reference_rows)
+    or unified_bank.get("validation", {}).get("version") != VALIDATION_VERSION
+):
+    rebuild_global_bank(reference_rows)
 
 
 def requested_bank_id(payload: dict | None = None) -> str:
